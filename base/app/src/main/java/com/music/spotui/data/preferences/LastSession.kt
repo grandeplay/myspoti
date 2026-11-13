@@ -37,6 +37,15 @@ object LastSession {
     }
 
     /**
+     * The local player's queue as saved: [songs] (the one playing first), each with its Spotify id
+     * from [ids] (a download's or an extension stream's; "" for a file of the device, left out:
+     * nothing would play it back). Downloads were saved without it, so a session of downloads came
+     * back as a single song with no id, which could not be resumed from its file.
+     */
+    fun localQueue(songs: List<SongsModel>, ids: List<String>): List<SongsModel> =
+        songs.zip(ids) { s, id -> s.copy(spotifyTrackId = id) }.filter { it.spotifyTrackId.isNotBlank() }
+
+    /**
      * Spotify's state at launch is older than the session saved from the local player: it still
      * shows the song played before and must not replace it. A state stamped after the save
      * (another device played since) or one that plays is real and wins.

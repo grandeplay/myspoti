@@ -30,6 +30,15 @@ class LastSessionTest {
         assertTrue(LastSession.queueFor("", page).isEmpty())
     }
 
+    @Test fun theLocalPlayersQueueKeepsEachSongsSpotifyId() {
+        // As the local player maps them: a download or an extension's stream has no Spotify id of its own.
+        val local = listOf(song(1), song(2), song(3)).map { it.copy(spotifyTrackId = "") }
+        // A download (id1, id3) is saved with its Spotify id, a file of the device (none) is left out.
+        val saved = LastSession.localQueue(local, listOf("id1", "", "id3"))
+        assertEquals(listOf("id1", "id3"), saved.map { it.spotifyTrackId })
+        assertEquals(listOf("t1", "t3"), saved.map { it.title })
+    }
+
     @Test fun olderPausedEngineStateDoesNotReplaceLocalSession() {
         assertTrue(LastSession.engineStateIsStale(LastSession.SOURCE_LOCAL, 2000, 1000, true))
         assertFalse(LastSession.engineStateIsStale(LastSession.SOURCE_LOCAL, 2000, 3000, true))

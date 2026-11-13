@@ -495,6 +495,7 @@ object SongPlayer {
         val key = "$uri|$playing|$liked|$source|$contextUri"
         if (uri.isBlank() || key == savedLast) return
         savedLast = key
+        val wasRestoredLocal = restoredLocal
         savedSource = source; savedAtMs = System.currentTimeMillis(); restoredLocal = false
         val p = lastTrackPrefs()
         // No queue known yet for this song: the one saved with it stays (a pause, a like), another song's goes.
@@ -508,6 +509,9 @@ object SongPlayer {
             .putLong("duration", durationMs).putLong("position", getCurrentPosition())
             .putBoolean("liked", liked)
             .apply()
+        // Spotify's state won over the local session put back at launch (another device played since):
+        // its queue, held meanwhile (see applyQueue), shows and is saved with its song now.
+        if (wasRestoredLocal && source == com.music.spotui.data.preferences.LastSession.SOURCE_SPOTIFY) applyQueue(apiQueue)
     }
 
     /**
@@ -961,6 +965,10 @@ object SongPlayer {
     private fun applyQueue(q: app.myspoti.api.Queue?) {
         apiQueue = q
         if (restoredQueuePending && q != null && q.current == null && q.queued.isEmpty() && q.nextUp.isEmpty()) return
+        // The local player's session saved at exit is on screen (a download, an extension's song):
+        // Spotify's queue is still the list played before it, as its state is (LastSession.engineStateIsStale).
+        // Kept for when Spotify's state wins (see saveLastTrack); it replaced the saved queue at launch.
+        if (restoredLocal) return
         // While a downloaded or local file plays, the queue shown is the local player's.
         if (q == null || LocalPlayer.active.value) return
         // A move is under way: its steps are not shown, the order dropped stays (see [queueMove]).
@@ -1804,6 +1812,10 @@ object SongPlayer {
         val wasLocal = restoredLocal
         if (resumeRestoredLocal()) { Haptics.click(); return }
         if (resumeThroughExtensions(wasLocal)) { Haptics.click(); return }
+        // The local session put back at launch could not play here (its file gone, no extension on):
+        // its song plays on Spotify where it was. A resume played what Spotify had paused on before
+        // it, another song than the one shown.
+        if (wasLocal && playRestoredOnSpotify()) { Haptics.click(); return }
         // Smart shuffle was turned off while paused: the list's order comes back as it plays on.
         plainOrderDue?.let { if (restorePlainOrder(it)) return }
         // Myspoti's shuffle turned on or off while paused: the song goes on in the list's new order.
@@ -3379,9 +3391,11 @@ object SongPlayer {
             trackListen("local:${t.id}", song, source, isPlaying)
             // An extension's stream or a download (it has a Spotify id): kept to come back to at launch.
             if (likeUri != null) {
-                val rest = LocalPlayer.upcoming().map { localSong(it.second) }.filter { it.spotifyTrackId.isNotBlank() }
+                val tracks = listOf(t) + LocalPlayer.upcoming().map { it.second }
+                val queue = com.music.spotui.data.preferences.LastSession.localQueue(
+                    listOf(song) + tracks.drop(1).map { localSong(it) }, tracks.map(LocalPlayer::spotifyIdOf))
                 saveLastTrack(song.copy(coverUri = cover), likeUri, liked, LocalPlayer.contextUri, LocalPlayer.contextName,
-                    com.music.spotui.data.preferences.LastSession.SOURCE_LOCAL, listOf(song) + rest)
+                    com.music.spotui.data.preferences.LastSession.SOURCE_LOCAL, queue)
             }
         }
     }
@@ -3402,6 +3416,18 @@ object SongPlayer {
         // In the list it was played in, as the extensions' resume does.
         val np = _nowPlaying.value
         LocalPlayer.play(list, 0, startMs = getCurrentPosition(), context = np.contextName.ifBlank { null }, contextUri = np.contextUri)
+        return true
+    }
+
+    /** The restored local session's song on Spotify, in its list when that is Spotify's, from where it was; false: not a Spotify song. */
+    private fun playRestoredOnSpotify(): Boolean {
+        val np = _nowPlaying.value
+        if (!np.uri.startsWith(SPOTIFY_TRACK_PREFIX)) return false
+        val q = _queue.value
+        val songs = listOfNotNull(q.current) + q.nextUp.map { it.song }
+        val ctx = np.contextUri.takeIf { it.startsWith("spotify:") }
+        app.myspoti.host.android.Logbook.log("audio: restored local session played on Spotify: ${np.uri} in ${ctx ?: "no list"}")
+        playSong(np.uri, contextUri = ctx, positionMs = getCurrentPosition(), songs = songs, askExtensions = false, alone = ctx == null)
         return true
     }
 
