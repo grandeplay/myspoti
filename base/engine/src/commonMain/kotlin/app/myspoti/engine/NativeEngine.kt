@@ -131,6 +131,8 @@ class NativeEngine(
     private var volume = config.initialVolume
     private var socket: WebSocketConnection? = null
     private val jobs = ArrayList<Job>()
+    /** When the dealer last sent anything, its pongs included ([env]'s clock): see [dealerAnswers]. */
+    private val lastFrameAt = kotlinx.coroutines.flow.MutableStateFlow(0L)
 
     private var machine: StateMachine? = null
     private var stateIndex = -1
@@ -185,6 +187,33 @@ class NativeEngine(
         emit(EngineEvent.Registered(deviceId))
     }
 
+    /** How long the dealer has said nothing (its pong answers a ping every 30 s on a live socket). */
+    fun quietMs(): Long = env.nowMs() - lastFrameAt.value
+
+    /**
+     * Whether the dealer still answers: at once when it spoke within [freshMs], else after a ping,
+     * when any frame comes back within [waitMs]. An engine kept across hours of pause (the app
+     * frozen, the phone asleep) can hold a socket that died with nothing noticed: no protocol
+     * pings, no read timeout, and its own pings not sent while frozen. Commands then went to a
+     * device the server no longer pushed to, and the first Play after a while did nothing.
+     */
+    suspend fun dealerAnswers(freshMs: Long, waitMs: Long): Boolean {
+        val since = env.nowMs()
+        if (since - lastFrameAt.value < freshMs) return true
+        val ws = socket ?: return false
+        if (runCatching { ws.send("""{"type":"ping"}""") }.isFailure) return false
+        return withTimeoutOrNull(waitMs) { lastFrameAt.first { it >= since } } != null
+    }
+
+    /**
+     * Its socket and jobs closed at once, nothing sent: an engine started half-way (cancelled) or
+     * whose dealer is dead. [close] says goodbye to the server, which can take its time.
+     */
+    fun abandon() {
+        jobs.forEach { it.cancel() }
+        socket?.close()
+    }
+
     /** Leaves like a closing tab: finalizes the current track, then the two DELETEs of SESSION.md. */
     suspend fun close() = lock.withLock {
         // A report the server refuses must not keep the device registered and the socket open.
@@ -216,6 +245,7 @@ class NativeEngine(
     private suspend fun awaitConnectionId(ws: WebSocketConnection): String {
         while (true) {
             val text = ws.receive() ?: throw EngineException.Protocol("dealer closed before its connection id")
+            lastFrameAt.value = env.nowMs()
             val f = runCatching { EngineJson.decodeFromString(DealerFrame.serializer(), text) }.getOrNull() ?: continue
             val id = f.headers?.entries?.firstOrNull { it.key.equals("spotify-connection-id", true) }?.value
             if (id != null) return id
@@ -225,6 +255,7 @@ class NativeEngine(
     private suspend fun readDealer(ws: WebSocketConnection) {
         while (true) {
             val text = ws.receive() ?: break
+            lastFrameAt.value = env.nowMs()
             runCatching { handleDealerFrame(text) }.onFailure { emit(EngineEvent.Failure("dealer: ${it.message}")) }
         }
         emit(EngineEvent.Disconnected)

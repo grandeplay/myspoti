@@ -129,7 +129,8 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
     override val current: kotlinx.coroutines.flow.StateFlow<NativeEngine?> = _current
 
     override suspend fun play(contextUri: String, trackUri: String?, index: Int?, positionMs: Long?, order: List<String>?, shuffle: Boolean?) {
-        val e = runCatching { ready() }.getOrElse { setAside("it did not start (${it.message})"); throw it }
+        // A start cancelled (a newer tap, the transport's time) is not one that failed: no 15 min aside for it.
+        val e = runCatching { ready() }.getOrElse { if (it !is kotlinx.coroutines.CancellationException) setAside("it did not start (${it.message})"); throw it }
         foreground()
         commandAtMs = System.currentTimeMillis()
         val since = e.clockMs()
@@ -152,6 +153,12 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
     }
     private const val FOREGROUND_MS = 2_000L
     private const val LOAD_WAIT_MS = 6_000L
+    /** A dealer heard within this answers as it is; quieter, it is pinged first (its pong comes every 30 s). */
+    private const val DEALER_FRESH_MS = 45_000L
+    /** How long a ping's answer is waited for before the engine is taken for dead. */
+    private const val DEALER_ANSWER_MS = 2_000L
+    /** At most this for a retired engine's goodbye to Spotify (its token may have to be asked again). */
+    private const val RETIRE_MS = 10_000L
     override suspend fun seek(positionMs: Long) { engine?.seekTo(positionMs) }
     override suspend fun next() { commandAtMs = System.currentTimeMillis(); ready().skipNext() }
     override suspend fun previous() { ready().previous() }
@@ -163,6 +170,8 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
     private var http: ChromiumHttp? = null
     @Volatile private var commandAtMs = 0L
     @Volatile private var lastEvent = ""
+    /** The current engine's events, followed until it is replaced. */
+    private var eventsJob: kotlinx.coroutines.Job? = null
     private val ring = ArrayDeque<String>()
 
     private fun log(line: String) {
@@ -215,7 +224,14 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
     }
 
     private suspend fun started(context: Context, forceL3: Boolean): NativeEngine = lock.withLock {
-        engine?.let { return it }
+        engine?.let { e ->
+            // Kept across a long pause, its dealer may be dead with nothing noticed (the app frozen,
+            // the phone asleep): asked first, and replaced when it does not answer, before a command
+            // goes to a device Spotify no longer pushes to (the first Play after hours did nothing).
+            if (e.dealerAnswers(DEALER_FRESH_MS, DEALER_ANSWER_MS)) return e
+            log("the dealer did not answer after ${e.quietMs() / 1000} s quiet: a new engine")
+            retire(e)
+        }
         val spotify = MyspotiRuntime.spotify
         val chromium = ChromiumHttp(context).also { http = it }
         val logged = LoggedHttp(chromium)
@@ -225,7 +241,8 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
         // A pause the player made itself (focus lost, headphones out) becomes a pause command, so
         // the account's state follows and the engine reports it when the push comes back.
         p.onPlayerPause = { why -> log("player paused itself: $why"); scope.launch { runCatching { e.pause() } } }
-        scope.launch {
+        eventsJob?.cancel()
+        eventsJob = scope.launch {
             e.events.collect { ev ->
                 lastEvent = ev.toString().take(120)
                 log("event $ev")
@@ -237,7 +254,16 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
             }
         }
         log("starting: widevine ${WidevineInfo.summary}, ${config.deviceName}, app ${config.appVersion}")
-        e.start()
+        try {
+            e.start()
+        } catch (t: Throwable) {
+            // Cancelled or failed half-way (a newer tap, the transport's time): nothing of it stays
+            // behind (its socket and jobs went on, a device left on the account, the player unreleased).
+            log("start not finished (${t.javaClass.simpleName}: ${t.message}): left")
+            e.abandon(); eventsJob?.cancel(); p.release()
+            if (player === p) player = null
+            throw t
+        }
         log("registered ${e.deviceId.take(8)}… on ${e.spclient.substringAfter("://")}, http ${chromium.status}")
         engine = e
         _current.value = e
@@ -249,10 +275,24 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
             lock.withLock {
                 if (engine !== e) return@withLock
                 log("the dealer closed: the engine leaves the account until its next use")
-                runCatching { e.close() }
-                player?.release()
-                engine = null; player = null; _current.value = null
+                retire(e)
             }
+        }
+    }
+
+    /**
+     * [e] off at once (under [lock]): the next use starts a new engine. Its goodbye to Spotify
+     * (finalize, the DELETEs, each maybe a token asked of the page) goes on in the background,
+     * bounded: run under the lock it held a tap waiting in [ready] for up to a minute.
+     */
+    private fun retire(e: NativeEngine) {
+        val p = player
+        engine = null; player = null; _current.value = null
+        eventsJob?.cancel(); eventsJob = null
+        e.abandon()
+        scope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(RETIRE_MS) { runCatching { e.close() } }
+            p?.release()
         }
     }
 

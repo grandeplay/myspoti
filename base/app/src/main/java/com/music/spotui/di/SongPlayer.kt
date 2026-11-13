@@ -716,8 +716,10 @@ object SongPlayer {
         if (s.item != null && !s.isPaused) restoredQueuePending = false
         if (resumeWhenReady) {
             resumeWhenReady = false
-            // The Web Player restored the last session paused: play what was tapped.
-            if (s.isPaused) transport { api.player.resume() }
+            // The Web Player restored the last session paused: play what was tapped. Not while the
+            // tap's own resume is still on its way (it waited for this page, it starts the engine):
+            // this one cancelled it as stuck after 3 s and started everything again.
+            if (s.isPaused && transportsInFlight.get() == 0) transport { api.player.resume() }
         }
         val item = s.item
         val uri = item?.uri.orEmpty()
