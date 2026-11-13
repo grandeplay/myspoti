@@ -46,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavController
 import app.myspoti.engine.R
 import com.music.spotui.data.api.Features
@@ -96,8 +97,10 @@ fun ImmersiveHomeScreen(navController: NavController) {
     val facet = homeViewModel.facet.value
     val context = LocalContext.current
     LaunchedEffect(Unit) { ProfileCache.ensure(context) }
-    // An old feed is read again when Home shows again (see HomeViewModel.refreshIfStale).
-    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { homeViewModel.refreshIfStale() }
+    // An old feed is read again when Home shows again, and while it stays on screen (see HomeViewModel.keepFresh).
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(lifecycle) { lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) { homeViewModel.keepFresh() } }
+    val refreshing by homeViewModel.refreshing.collectAsState()
 
     // Re-tapping the Home tab while on Home scrolls back to the top, as in the Classic screen.
     val listState = rememberLazyListState()
@@ -142,6 +145,12 @@ fun ImmersiveHomeScreen(navController: NavController) {
     LaunchedEffect(shortcuts) { prefetchHomeShortcuts(shortcuts) }
 
     Box(Modifier.fillMaxSize().background(Immersive.Page)) {
+      // Pull down to read it again now, as on Library.
+      androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = { homeViewModel.refresh() },
+        modifier = Modifier.fillMaxSize(),
+      ) {
         LazyColumn(
             state = listState,
             // The greeting is the floating header's own title, so the feed starts right under it
@@ -196,6 +205,7 @@ fun ImmersiveHomeScreen(navController: NavController) {
                 }
             }
         }
+      }
         // The greeting, the bell and the profile disc on floating glass; the feed scrolls under it.
         ImmersiveFloatingHeader(title, collapse = rememberTopBarCollapse(listState, 24.dp)) {
             // Friend activity, out of the tab bar: beside the profile, as Spotify has it.

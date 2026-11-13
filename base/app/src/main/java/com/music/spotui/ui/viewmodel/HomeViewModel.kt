@@ -19,16 +19,21 @@ class HomeViewModel constructor(private val repository: AppRepository = Graph.re
     /** Selected home chip ("" = All). */
     val facet = androidx.compose.runtime.mutableStateOf("")
     private var homeJob: kotlinx.coroutines.Job? = null
-    /** When the feed was last asked for. */
-    private var fetchedAt = 0L
+
+    private val _refreshing = MutableStateFlow(false)
+    /** A pull to refresh under way: its spinner shows until the read is over. */
+    val refreshing: StateFlow<Boolean> = _refreshing
 
     init {
         fetchHome()
         // A Home that failed (player still signing in, network back) loads again by itself:
-        // when the player is ready again, then a few times with growing pauses.
+        // when the player is ready again, then a few times with growing pauses. The copy kept on
+        // storage is read again once the player is ready too: the read at launch gives up when the
+        // player takes more than 30 s, and that copy stayed up for the next half hour.
         viewModelScope.launch {
             app.myspoti.host.android.MyspotiRuntime.api.ready.collect { ready ->
-                if (ready && _home.value is Response.Error) fetchHome()
+                if (!ready) return@collect
+                if (_home.value is Response.Error) fetchHome() else refreshIfStale()
             }
         }
         viewModelScope.launch {
@@ -50,12 +55,34 @@ class HomeViewModel constructor(private val repository: AppRepository = Graph.re
     }
 
     /**
-     * Home shown again (back on its tab, the app reopened): read again once it is older than
-     * [STALE_MS], behind the feed shown. It was read once per launch, and an app kept open for
-     * days showed the same releases and picks (reported: nothing new to discover).
+     * Home shown again (back on its tab, the app reopened): read again once the feed shown is older
+     * than [HomeFreshness.STALE_MS], behind the feed shown. It was read once per launch, and an app
+     * kept open for days showed the same releases and picks (reported: nothing new to discover).
+     * The age is the feed's, not the last attempt's: a read that failed left the old feed up for
+     * the next half hour.
      */
     fun refreshIfStale() {
-        if (System.currentTimeMillis() - fetchedAt >= STALE_MS) fetchHome()
+        val shown = (_home.value as? Response.Success)?.data?.readAtMs
+        if (HomeFreshness.needsRead(shown, reading = homeJob?.isActive == true, nowMs = System.currentTimeMillis())) fetchHome()
+    }
+
+    /**
+     * While Home is on screen: [refreshIfStale] now and every [HomeFreshness.CHECK_MS] (Home left
+     * open, or under the player, was never read again).
+     */
+    suspend fun keepFresh() {
+        while (true) {
+            refreshIfStale()
+            kotlinx.coroutines.delay(HomeFreshness.CHECK_MS)
+        }
+    }
+
+    /** Pulled down: read again now, whatever its age. */
+    fun refresh() {
+        if (_refreshing.value) return
+        _refreshing.value = true
+        fetchHome()
+        homeJob?.invokeOnCompletion { _refreshing.value = false }
     }
 
     /**
@@ -70,17 +97,30 @@ class HomeViewModel constructor(private val repository: AppRepository = Graph.re
 
     private companion object {
         val RETRY_DELAYS_MS = longArrayOf(2_000, 5_000, 15_000, 30_000)
-        const val STALE_MS = 30 * 60_000L
     }
 
     private fun fetchHome() {
         homeJob?.cancel()
         val f = facet.value
-        fetchedAt = System.currentTimeMillis()
         homeJob = viewModelScope.launch(Dispatchers.IO) {
             repository.provideHomeFeed(f).collect { feed ->
                 _home.value = feed
             }
         }
     }
+}
+
+/** When Home's feed is read again (kept pure, tested without Android). */
+internal object HomeFreshness {
+    /** A feed older than this is read again (was 30 min: what was just played showed late in "Jump back in"). */
+    const val STALE_MS = 5 * 60_000L
+    /** How often Home on screen looks at its feed's age. */
+    const val CHECK_MS = 60_000L
+
+    /**
+     * The feed shown, sent by Spotify at [shownReadAtMs] (null: none shown; 0: a copy kept on
+     * storage, undated), is read again: no read under way, and it is older than [STALE_MS].
+     */
+    fun needsRead(shownReadAtMs: Long?, reading: Boolean, nowMs: Long): Boolean =
+        !reading && (shownReadAtMs == null || nowMs - shownReadAtMs >= STALE_MS)
 }

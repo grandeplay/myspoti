@@ -63,6 +63,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavController
 import com.bumptech.glide.integration.compose.ExperimentalGlideComposeApi
 import com.bumptech.glide.integration.compose.GlideImage
@@ -90,9 +91,11 @@ import com.music.spotui.ui.viewmodel.HomeViewModel
 fun HomeScreen(navController: NavController){
 
     val homeViewModel : HomeViewModel = viewModel()
-    // An old feed is read again when Home shows again (see HomeViewModel.refreshIfStale).
-    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { homeViewModel.refreshIfStale() }
+    // An old feed is read again when Home shows again, and while it stays on screen (see HomeViewModel.keepFresh).
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    androidx.compose.runtime.LaunchedEffect(lifecycle) { lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) { homeViewModel.keepFresh() } }
     val home by homeViewModel.home.collectAsState()
+    val refreshing by homeViewModel.refreshing.collectAsState()
 
     Surface(
         modifier = Modifier
@@ -105,7 +108,12 @@ fun HomeScreen(navController: NavController){
         com.music.spotui.ui.components.LoadedFade(!hasFeed) { waiting ->
         when {
             // Preferred: the real personalized Spotify home feed.
-            !waiting && feed != null -> {
+            // Pull down to read it again now, as on Library.
+            !waiting && feed != null -> androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+                isRefreshing = refreshing,
+                onRefresh = { homeViewModel.refresh() },
+                modifier = Modifier.fillMaxSize(),
+            ) {
                 HomeFeedContent(navController, feed, homeViewModel.facet.value) { homeViewModel.selectFacet(it) }
             }
 

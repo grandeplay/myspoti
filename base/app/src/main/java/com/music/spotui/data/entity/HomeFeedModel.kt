@@ -9,6 +9,8 @@ package com.music.spotui.data.entity
 data class HomeFeedModel(
     val greeting: String = "",
     val sections: List<HomeSection> = emptyList(),
+    /** When Spotify sent it (epoch ms); 0 for a copy kept on storage by a version that did not date it. */
+    val readAtMs: Long = 0L,
 )
 
 /**

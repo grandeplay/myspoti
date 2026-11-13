@@ -423,7 +423,7 @@ class Api constructor(
                         .distinctBy { it::class.simpleName + "|" + it.name.lowercase() }
                     if (items.isEmpty()) null else HomeSection(title = shelf.title.orEmpty(), items = items)
                 }.distinctBy { it.title.lowercase().ifBlank { it.hashCode().toString() } }
-                val model = HomeFeedModel(greeting = feed.greeting, sections = sections)
+                val model = HomeFeedModel(greeting = feed.greeting, sections = sections, readAtMs = System.currentTimeMillis())
                 if (facet.isEmpty()) { HomeCache.home = model; ScreenCache.home.write(model) } else HomeCache.facets[facet] = model
                 emit(Response.Success(model))
             },
