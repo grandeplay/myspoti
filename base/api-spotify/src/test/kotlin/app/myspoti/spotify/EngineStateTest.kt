@@ -25,8 +25,11 @@ import org.junit.jupiter.api.Test
 class EngineStateTest {
     private class FakeHost : BridgeHost {
         override val messages = MutableSharedFlow<String>(extraBufferCapacity = 64)
+        /** The page calls made, by name. */
+        val called = mutableListOf<String>()
         override suspend fun evaluate(script: String) {
             val m = Regex("""Myspoti\.call\((\d+), "([^"]+)", (.*)\)\.catch""", RegexOption.DOT_MATCHES_ALL).find(script) ?: return
+            called += m.groupValues[2]
             val value = if (m.groupValues[2] == "media.state") """{"paused":true,"muted":false,"level":1,"own":1,"time":0,"active":false}""" else "null"
             messages.emit("""{"type":"result","id":${m.groupValues[1]},"ok":true,"value":$value}""")
         }
@@ -42,7 +45,9 @@ class EngineStateTest {
         val calls = mutableListOf<String>()
         override suspend fun play(contextUri: String, trackUri: String?, index: Int?, positionMs: Long?, order: List<String>?, shuffle: Boolean?) { calls += "play $trackUri" }
         override suspend fun pause() { calls += "pause" }
-        override suspend fun resume() { calls += "resume" }
+        /** Its resume fails (no session came to it). */
+        var resumeFails = false
+        override suspend fun resume() { calls += "resume"; if (resumeFails) error("no session to resume came to this device") }
         override suspend fun seek(positionMs: Long) { calls += "seek $positionMs" }
         override suspend fun next() { calls += "next" }
         override suspend fun previous() { calls += "previous" }
@@ -162,5 +167,16 @@ class EngineStateTest {
         player.seek(10_000)
         player.next()
         assertEquals(listOf("pause", "resume", "seek 10000", "next"), engine.calls)
+        assertFalse("player.resume" in host.called)
+    }
+
+    @Test fun `a resume the engine cannot take is the page's, as a play is`() = time.test {
+        host.post("""{"type":"ready"}""")
+        host.post(pageState(track("A"), paused = true, positionMs = 1_000))
+        waitFor("page state") { player.pageState.value != null }
+        engine.resumeFails = true
+        player.resume()
+        assertEquals(listOf("resume"), engine.calls)
+        assertTrue("player.resume" in host.called)
     }
 }

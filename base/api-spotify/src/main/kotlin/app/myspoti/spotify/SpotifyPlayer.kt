@@ -1890,7 +1890,16 @@ class SpotifyPlayer(private val bridge: Bridge, private val scope: CoroutineScop
 
     override suspend fun resume() {
         userPlays()
-        outside()?.let { a -> pausedByUser = false; a.resume(); return }
+        // It could not resume (no session came to it, it did not start): the page resumes, as [play] falls back.
+        outside()?.let { a ->
+            pausedByUser = false
+            val resumed = runCatching { a.resume() }.onFailure {
+                // A newer command took over (or the transport timed out): nothing more is resumed.
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                bridge.logger?.invoke("resume outside the page failed (${it.message}): the page resumes")
+            }
+            if (resumed.isSuccess) return
+        }
         // The user's pick around an ad they paused during: played now, in one play (held by
         // [playAsked] if an ad or a reload is still on), not the song before the ad.
         val pick = pickAfterPause?.takeIf { pausedByUser }

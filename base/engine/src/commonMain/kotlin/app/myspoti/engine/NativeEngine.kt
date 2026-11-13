@@ -238,6 +238,23 @@ class NativeEngine(
 
     suspend fun pause() = command("pause")
     suspend fun resume() = command("resume")
+
+    /**
+     * The user's resume: on a device that holds nothing yet (started after a relaunch, or again
+     * after its dealer closed) the account's paused session is taken here first and waited for
+     * (at most [loadWaitMs]), as a page load did (transfer, its paused load, then resume: the
+     * captures in SessionTest). A bare resume to such a device was a command with no session
+     * behind it: the Play button did nothing. No session came: [EngineException.Protocol].
+     */
+    suspend fun resumeHere(loadWaitMs: Long) {
+        if (now.value == null) {
+            val since = clockMs()
+            transfer()
+            if (!awaitLoaded(null, since, loadWaitMs)) throw EngineException.Protocol("no session to resume came to this device")
+        }
+        resume()
+    }
+
     suspend fun skipNext() = command("skip_next")
     /**
      * A seek of the song loaded here. Sent once a load under way is reported (its

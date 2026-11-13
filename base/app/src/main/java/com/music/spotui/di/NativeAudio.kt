@@ -140,7 +140,8 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
         if (positionMs != null && positionMs > 0 && e.awaitLoaded(trackUri ?: contextUri.takeIf { it.startsWith("spotify:track:") }, since, LOAD_WAIT_MS)) e.seekTo(positionMs)
     }
     override suspend fun pause() { engine?.pause() }
-    override suspend fun resume() { val e = ready(); foreground(); e.resume() }
+    // A new engine (after a relaunch) takes the account's paused session before resuming it.
+    override suspend fun resume() { val e = ready(); foreground(); e.resumeHere(LOAD_WAIT_MS) }
 
     /** The playback service in the foreground before the engine's player asks for the audio (Android refuses it otherwise). */
     private suspend fun foreground() {
