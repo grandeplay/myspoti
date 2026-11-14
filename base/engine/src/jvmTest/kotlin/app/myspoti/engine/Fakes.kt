@@ -104,12 +104,19 @@ class FakeHttp : Http {
     val gates = HashMap<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
     /** The requests in the order their answers came back. */
     val answered = ArrayList<HttpRequest>()
+    /**
+     * How many times the state PUT whose debug_source is the key fails in transport, the way a QUIC
+     * connection gone idle while the phone slept does (`ERR_CONNECTION_CLOSED` at once).
+     */
+    val broken = HashMap<String, Int>()
 
     override suspend fun request(request: HttpRequest): HttpResponse {
         requests += request
         if (request.method == "PUT" && request.url.endsWith("/state")) {
             val source = json(request)["debug_source"]?.jsonPrimitive?.content
             gates[source]?.await()
+            val left = broken[source] ?: 0
+            if (left > 0) { broken[source!!] = left - 1; throw java.io.IOException("net::ERR_CONNECTION_CLOSED") }
         }
         return answer(request).also { answered += request }
     }

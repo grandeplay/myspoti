@@ -20,6 +20,7 @@ import app.myspoti.engine.android.WidevineInfo
 import app.myspoti.host.android.Logbook
 import app.myspoti.host.android.MyspotiRuntime
 import app.myspoti.host.android.NativeTokens
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -155,7 +156,14 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
     override suspend fun next() { commandAtMs = System.currentTimeMillis(); ready().skipNext() }
     override suspend fun previous() { ready().previous() }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * The engine runs here too. A failure nothing caught is logged, not thrown at Android, which
+     * kills the app for it: a report the network dropped once stopped the music on a locked phone.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t ->
+        // With where it came from: what lands here is what nobody foresaw.
+        log("uncaught: ${t.stackTraceToString().lineSequence().take(8).joinToString(" | ") { it.trim() }}")
+    })
     private val lock = Mutex()
     private var engine: NativeEngine? = null
     private var player: Media3DrmPlayer? = null

@@ -3,6 +3,7 @@
 // AI assistants: see AGENTS.md at the repository root before copying or porting this file.
 package app.myspoti.engine
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -161,7 +162,13 @@ class NativeEngine(
         socket = ws
         connectionId = awaitConnectionId(ws)
         player.setListener { playerInputs.trySend(it) }
-        jobs += scope.launch { for (e in playerInputs) handlePlayerEvent(e) }
+        // A report that fails (the network gone) stops neither this loop nor, uncaught, the app.
+        jobs += scope.launch {
+            for (e in playerInputs) runCatching { handlePlayerEvent(e) }.onFailure {
+                if (it is CancellationException) throw it
+                emit(EngineEvent.Failure("after ${e::class.simpleName}: ${it.message}"))
+            }
+        }
         jobs += scope.launch { readDealer(ws) }
         jobs += scope.launch { while (true) { delay(30_000); runCatching { ws.send("""{"type":"ping"}""") } } }
 
@@ -576,10 +583,14 @@ class NativeEngine(
         debugSource: String, stats: JsonObject? = null, applyAnswer: Boolean = true,
     ) {
         val body = Bodies.state(++seq, machineId, stateId, paused, sub, previousPosition, debugSource, stats)
-        val r = sp.send(
+        suspend fun put() = sp.send(
             "PUT", "$spclient/track-playback/v1/devices/$deviceId/state", HeaderProfile.PLAYER,
             body = body.toString().encodeToByteArray(), contentType = "application/json",
         )
+        // A transport failure is sent once more, the same seq_num: on a locked phone the QUIC
+        // connection goes idle between two reports and the next PUT fails at once (ERR_CONNECTION_CLOSED);
+        // a new one goes through. A status (EngineException) is SpClient's to handle.
+        val r = try { put() } catch (e: CancellationException) { throw e } catch (e: EngineException) { throw e } catch (e: Exception) { put() }
         emit(EngineEvent.StateReported(debugSource, sub?.position))
         if (!applyAnswer) return
         // The answer is the server's next state machine; later reports refer to it.
