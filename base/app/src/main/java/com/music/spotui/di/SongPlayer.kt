@@ -121,6 +121,12 @@ object SongPlayer {
 
     // ── Player state ──
     @Volatile private var playing = false
+        set(value) {
+            // A song starts: its position saved from 10 s on, not after the idle look's 30 s (a look
+            // that fell between two songs left the next one unsaved that long).
+            if (value && !field) { main.removeCallbacks(savePosition); main.postDelayed(savePosition, POSITION_SAVE_MS) }
+            field = value
+        }
     private val bufferingState = mutableStateOf(false)
     /** Observable startup state: visual lookups wait for the audio transport. */
     val isBuffering: Boolean get() = bufferingState.value
@@ -266,6 +272,7 @@ object SongPlayer {
         scope.launch { api.player.state.collect { s -> if (acceptsSessionUpdates()) applyState(s) } }
         AccountSync.attach()
         NativeAudio.attach()
+        NativeAudio.saved = { restoredPosition }
         // Another device plays (the phone as a remote): the state is read again every few seconds
         // so the notification, the mini player and the slider keep up. Reported: the notification
         // stopped refreshing in the background — this loop waited for _activeDevice, which only a
@@ -434,6 +441,11 @@ object SongPlayer {
     private var savedAtMs = 0L
     /** A local-player session was put back paused at launch: play restarts it there, not through Spotify. */
     private var restoredLocal = false
+    /**
+     * The position put back at launch and when it was saved, until the song plays: a new engine's
+     * resume goes there when the account heard an older one (an app closed mid-song).
+     */
+    @Volatile private var restoredPosition: app.myspoti.engine.NativeEngine.Saved? = null
     @Volatile private var resumeWhenReady = false
 
     private fun restoreLastTrack(state: CurrentSongState) {
@@ -450,6 +462,7 @@ object SongPlayer {
         durationMs = p.getLong("duration", 0L)
         positionMs = p.getLong("position", 0L)
         positionAt = SystemClock.elapsedRealtime()
+        restoredPosition = p.getLong("positionAt", 0L).takeIf { it > 0 }?.let { app.myspoti.engine.NativeEngine.Saved(uri, positionMs, it) }
         playing = false
         // The list it was played in, with its name and queue: a resume through the extensions plays
         // the song in it (alone, the list was lost at every launch).
@@ -497,9 +510,10 @@ object SongPlayer {
         savedLast = key
         savedSource = source; savedAtMs = System.currentTimeMillis(); restoredLocal = false
         val p = lastTrackPrefs()
+        val sameSong = p.getString("uri", "") == uri
         // No queue known yet for this song: the one saved with it stays (a pause, a like), another song's goes.
-        val kept = if (queue.isNullOrEmpty() && p.getString("uri", "") == uri) p.getString("queue", "").orEmpty() else null
-        p.edit()
+        val kept = if (queue.isNullOrEmpty() && sameSong) p.getString("queue", "").orEmpty() else null
+        val e = p.edit()
             .putString("source", source).putLong("savedAt", savedAtMs)
             .putString("queue", kept ?: queue?.let(com.music.spotui.data.preferences.LastSession::encodeQueue).orEmpty())
             .putString("contextUri", contextUri).putString("contextName", contextName)
@@ -507,7 +521,10 @@ object SongPlayer {
             .putString("album", song.album).putString("cover", song.coverUri)
             .putLong("duration", durationMs).putLong("position", getCurrentPosition())
             .putBoolean("liked", liked)
-            .apply()
+        // When the position was last seen true: now while it plays. A paused one keeps the time of the
+        // last save (older only lets the account's state win), another song's goes.
+        if (playing && !isBuffering) e.putLong("positionAt", System.currentTimeMillis()) else if (!sameSong) e.remove("positionAt")
+        e.apply()
     }
 
     /**
@@ -520,15 +537,34 @@ object SongPlayer {
             // Nothing plays: a look now and then for a song that started, not a wake every ten seconds.
             val on = playing || LocalPlayer.isPlaying()
             main.postDelayed(this, if (on) POSITION_SAVE_MS else POSITION_IDLE_MS)
-            if (!on) return
+            if (!on) {
+                noteUnsaved(if (NativeAudio.now.value?.playing == true) "the engine plays, the app takes it for paused" else "")
+                return
+            }
             val p = lastTrackPrefs()
             val uri = p.getString("uri", "").orEmpty()
             val now = if (LocalPlayer.active.value) localSpotifyUri(LocalPlayer.current()) else _nowPlaying.value.uri
-            if (uri.isBlank() || uri != now) return
-            p.edit().putLong("position", getCurrentPosition()).apply()
+            if (uri.isBlank() || uri != now) {
+                if (uri.isNotBlank()) noteUnsaved("the song shown (${now?.takeLast(22)}) is not the one saved (${uri.takeLast(22)})")
+                return
+            }
+            noteUnsaved("")
+            // With the time it was true: a relaunch weighs it against the account's last report.
+            p.edit().putLong("position", getCurrentPosition()).putLong("positionAt", System.currentTimeMillis()).apply()
         }
     }
     init { main.postDelayed(savePosition, POSITION_SAVE_MS) }
+
+    /**
+     * Why the position was left unsaved while a song played ("" once saved again), logged when it
+     * changes: a song killed at 4:06 had 3:01 saved, a minute behind with nothing in the log.
+     */
+    private var unsavedWhy = ""
+    private fun noteUnsaved(why: String) {
+        if (why == unsavedWhy) return
+        unsavedWhy = why
+        if (why.isNotEmpty()) app.myspoti.host.android.Logbook.log("position not saved: $why")
+    }
 
     private fun acceptsSessionUpdates() = Graph.app.getSharedPreferences("myspoti_prefs", Context.MODE_PRIVATE)
         .getBoolean("LoggedIn", false)
@@ -555,7 +591,7 @@ object SongPlayer {
         synchronized(wantedSaved) { wantedSaved.clear() }
         _queue.value = EngineQueue(); apiQueue = null; restoredQueuePending = false; _nowPlaying.value = NowPlaying()
         lastTrackPrefs().edit().clear().apply(); savedLast = ""; resumeWhenReady = false
-        savedSource = com.music.spotui.data.preferences.LastSession.SOURCE_SPOTIFY; savedAtMs = 0L; restoredLocal = false
+        savedSource = com.music.spotui.data.preferences.LastSession.SOURCE_SPOTIFY; savedAtMs = 0L; restoredLocal = false; restoredPosition = null
         _activeDevice.value = null; _sleepEndsAt.value = null; sleepFade?.cancel(); main.removeCallbacks(sleepFadeRunnable); sleepTrackId = null; spotifyFallbackId = null
         // The Connect device picked was the account's that leaves: the next one starts on this phone.
         chosenRemote = null
@@ -713,7 +749,8 @@ object SongPlayer {
         if (AccountSync.watchActive && AccountSync.holdsSpotify) { if (AccountSync.holdsSpotifyPage) AccountSync.listen.onProviderState(s); return }
         // Spotify's server still shows the song played before the local-player session saved at exit.
         if (com.music.spotui.data.preferences.LastSession.engineStateIsStale(savedSource, savedAtMs, s.timestampMs, s.isPaused)) return
-        if (s.item != null && !s.isPaused) restoredQueuePending = false
+        // A song plays: the engine's own position from now on, not the one put back at launch.
+        if (s.item != null && !s.isPaused) { restoredQueuePending = false; restoredPosition = null }
         if (resumeWhenReady) {
             resumeWhenReady = false
             // The Web Player restored the last session paused: play what was tapped. Not while the

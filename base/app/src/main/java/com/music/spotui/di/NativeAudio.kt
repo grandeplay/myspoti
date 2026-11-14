@@ -141,8 +141,23 @@ object NativeAudio : app.myspoti.spotify.AccountAudio, app.myspoti.spotify.sync.
         if (positionMs != null && positionMs > 0 && e.awaitLoaded(trackUri ?: contextUri.takeIf { it.startsWith("spotify:track:") }, since, LOAD_WAIT_MS)) e.seekTo(positionMs)
     }
     override suspend fun pause() { engine?.pause() }
+
+    /** Where the app saw the song shown play before a relaunch (SongPlayer's): a new engine's resume weighs it against the account's. */
+    @Volatile var saved: () -> NativeEngine.Saved? = { null }
+
     // A new engine (after a relaunch) takes the account's paused session before resuming it.
-    override suspend fun resume() { val e = ready(); foreground(); e.resumeHere(LOAD_WAIT_MS) }
+    override suspend fun resume() {
+        val e = ready()
+        foreground()
+        val s = saved()
+        // What the choice is made from: whether the account's state is stamped before the phone's save.
+        if (s != null && e.now.value == null) e.cluster.value.let { a ->
+            val t = System.currentTimeMillis()
+            log("resume: this phone saved ${s.positionMs / 1000} s, ${(t - s.atMs) / 1000} s ago; the account ${a?.positionMs?.div(1000)} s, " +
+                "${a?.let { (t - it.timestampMs) / 1000 }} s ago (${if (a?.paused == true) "paused" else "playing"}, active ${a?.activeDeviceId?.take(6)}), same song ${a?.trackUri == s.uri}")
+        }
+        e.resumeHere(LOAD_WAIT_MS, s)?.let { log("resume at ${it / 1000} s, where this phone saw it after the account's last report") }
+    }
 
     /** The playback service in the foreground before the engine's player asks for the audio (Android refuses it otherwise). */
     private suspend fun foreground() {

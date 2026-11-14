@@ -79,6 +79,13 @@ class NativeEngine(
         val albumUri: String? = null,
     )
 
+    /**
+     * Where the app last saw a song play: [positionMs] of [uri] as of [atMs] (this clock), kept on
+     * the phone while it plays. The account hears a position only at a load, a pause, a seek and
+     * 30 s in: an app closed mid-song (stopped, killed) leaves it minutes behind ([resumeFrom]).
+     */
+    data class Saved(val uri: String, val positionMs: Long, val atMs: Long)
+
     private val _now = kotlinx.coroutines.flow.MutableStateFlow<Now?>(null)
     val now: kotlinx.coroutines.flow.StateFlow<Now?> = _now
 
@@ -276,14 +283,21 @@ class NativeEngine(
      * (at most [loadWaitMs]), as a page load did (transfer, its paused load, then resume: the
      * captures in SessionTest). A bare resume to such a device was a command with no session
      * behind it: the Play button did nothing. No session came: [EngineException.Protocol].
+     * The session loads where the account last heard it; [saved], newer, is sought first ([resumeFrom]).
+     * Returns the position sought, null when none was.
      */
-    suspend fun resumeHere(loadWaitMs: Long) {
+    suspend fun resumeHere(loadWaitMs: Long, saved: Saved? = null): Long? {
+        var sought: Long? = null
         if (now.value == null) {
+            // What the account held before this device takes it: the position it last heard, and when.
+            val account = cluster.value
             val since = clockMs()
             transfer()
             if (!awaitLoaded(null, since, loadWaitMs)) throw EngineException.Protocol("no session to resume came to this device")
+            sought = resumeFrom(saved, account, now.value)?.also { seekTo(it) }
         }
         resume()
+        return sought
     }
 
     suspend fun skipNext() = command("skip_next")
@@ -656,5 +670,22 @@ class NativeEngine(
     companion object {
         /** `started_playing` came 1066-1245 ms into real playback in every capture (four tracks). */
         const val STARTED_AFTER_MS = 1_000L
+        /** The phone's clock and the account's apart: a save within this of the account's state is not newer. */
+        private const val SAVED_SLACK_MS = 2_000L
+        /** A saved position this close to the loaded one is not worth a seek. */
+        private const val SAVED_MIN_SEEK_MS = 3_000L
+
+        /**
+         * Where a resumed session should be instead of [loaded], or null: [saved] when it is of the
+         * song loaded, inside it, a few seconds away, and newer than the [account]'s state. The
+         * account's wins otherwise: another device played since, or nothing tells which is newer.
+         */
+        fun resumeFrom(saved: Saved?, account: Cluster?, loaded: Now?): Long? {
+            if (saved == null || account == null || loaded == null || saved.uri != loaded.uri) return null
+            if (saved.atMs <= account.timestampMs + SAVED_SLACK_MS) return null
+            if (saved.positionMs < 0 || (loaded.durationMs > 0 && saved.positionMs >= loaded.durationMs)) return null
+            if (kotlin.math.abs(saved.positionMs - loaded.positionMs) < SAVED_MIN_SEEK_MS) return null
+            return saved.positionMs
+        }
     }
 }
