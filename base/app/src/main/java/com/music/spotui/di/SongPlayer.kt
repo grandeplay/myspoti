@@ -534,7 +534,7 @@ object SongPlayer {
      */
     private val savePosition = object : Runnable {
         override fun run() {
-            // Nothing plays: a look now and then for a song that started, not a wake every ten seconds.
+            // Nothing plays: a look now and then for a song that started, not a wake every five seconds.
             val on = playing || LocalPlayer.isPlaying()
             main.postDelayed(this, if (on) POSITION_SAVE_MS else POSITION_IDLE_MS)
             if (!on) {
@@ -1628,7 +1628,11 @@ object SongPlayer {
             positionMs = end.takeIf { it > 0 }, askExtensions = false)
     }
 
-    private const val POSITION_SAVE_MS = 10_000L
+    /**
+     * How often a playing song's position is saved: the most an app killed mid-song (force-stopped,
+     * crashed) loses on its relaunch. 10 s went back audibly far; a write every 5 s costs nothing.
+     */
+    private const val POSITION_SAVE_MS = 5_000L
     /** How often the position save looks for a song playing while none does. */
     private const val POSITION_IDLE_MS = 30_000L
 
