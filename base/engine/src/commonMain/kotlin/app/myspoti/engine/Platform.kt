@@ -109,6 +109,13 @@ interface DrmPlayer {
     /** Prepares [media] ahead of time (licence and first segment) for a fast switch; it must stay silent. */
     fun preload(media: PlayableMedia, licence: LicenceChannel)
 
+    /**
+     * Loads an unprotected file at [url] with [headers] (an ad's MP3, ADS.md: no licence, no
+     * segments), from its start, playing at once when [playWhenReady]. Replaces the current item;
+     * reports through the same events as [load].
+     */
+    fun loadPlain(trackUri: String, url: String, headers: Map<String, String>, playWhenReady: Boolean)
+
     fun pause()
     fun resume()
     fun seekTo(positionMs: Long)

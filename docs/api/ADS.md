@@ -141,3 +141,32 @@ On Android the replies pass through `ControlRelay`, which applies steps 1 and 2.
 host does not rewrite replies yet.
 
 Over the measured session: no ad heard or shown, no reload.
+
+## Measured on 2026-11-16: skipping, putting off and playing an ad
+
+Free account, Android, Web Player 1.3.11, the account's page and the native engine in turn.
+
+- Skipping: the native engine sent `skip_next` on every ad it loaded. Spotify passed the first ads
+  of a session, then sent the same ad back after each skip; the engine skipped it again, about
+  three times a second, until every command of the account was answered `429 Too many requests
+  for user` for about a minute.
+- Refusing the ad's MP3 at the end of a song (the page, the block list's `[ads]`): the page
+  reported the failed load (a state PUT with `debug_source: "error"`, melody
+  `jssdk_playback_error`), both answered 2xx, and the ad stayed current; the music stopped.
+- A new play of the song after the ad, about a second before the song before it ended: twice on
+  the page Spotify moved the ad after that song; once on the native engine the new play started
+  with the ad, and every skip after it was refused (`ad_disallow`).
+- Played to its end on the page (23 s, `aet.spotify.com` refused by the phone's DNS): the same
+  reports as a song. `track_data_finalized` of the song, `before_track_load` of the ad (speed 0),
+  melody `jssdk_playback_start`, `started_playing` after ~1.2 s, then at its end melody
+  `jssdk_playback_stats` alone (no `track_stream_verification`), `track_data_finalized` and the
+  next song's `before_track_load`. No `played_threshold_reached`, although the ad's
+  `ms_played_until_update` was 1000. The values that differ: `sub_state.format`
+  `file_urls_external`, `bitrate` 160000, `audio_quality` null; in the stats `mp3` for the codec,
+  no key system (`none` in the PUT, empty in melody), `ms_played_per_audio_format` `mp3;160000`,
+  `total_bytes` 0, `ms_file_duration` 0, one URL in `urls_json`. The ad's track carries
+  `file_urls_mp3` (`file_url` on `adstudio-assets.scdn.co`, `bitrate`, `impression_urls` on
+  `aet.spotify.com/v2/t`); its state has no `skip_next`, `disallow_seeking`, and an `advance` to
+  the next song. The refused impression did not hold the ad.
+
+The native engine now plays an ad this way (NATIVE-PLAYBACK.md, section 10).

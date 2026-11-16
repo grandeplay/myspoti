@@ -325,7 +325,7 @@ class SessionTest {
     }
 
     @Test
-    fun an_ad_is_neither_fetched_nor_reported() = runTest {
+    fun an_ad_without_an_mp3_is_passed_with_a_skip() = runTest {
         val rig = Rig(backgroundScope)
         val events = ArrayList<EngineEvent>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { rig.engine.events.collect { events += it } }
@@ -334,7 +334,8 @@ class SessionTest {
         val frame = rig.replaceState(2, paused = false, seekTo = 0).replace("\"content_type\":\"TRACK\"", "\"content_type\":\"AD\"")
         rig.engine.handleDealerFrame(frame)
         runCurrent()
-        // Nothing is asked for the ad and nothing reported of it: the one request is the command that passes it.
+        // The fixture's tracks have no `file_urls_mp3`: nothing to play, nothing asked for nor
+        // reported, the one request is the command that passes it (an ad with one: AdPlaybackTest).
         assertEquals(before + 1, rig.http.requests.size)
         val sent = rig.http.requests.last()
         assertTrue("/connect-state/v1/player/command/" in sent.url)

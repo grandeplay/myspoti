@@ -73,6 +73,8 @@ class ManifestFile(
     val bitrate: Int? = null,
     @SerialName("file_id") val fileId: String? = null,
     @SerialName("file_url") val fileUrl: String? = null,
+    /** An ad's: the addresses the Web Player calls when it plays it (`aet.spotify.com/v2/t`). */
+    @SerialName("impression_urls") val impressionUrls: List<String> = emptyList(),
     @SerialName("track_type") val trackType: String? = null,
     val format: String? = null,
     @SerialName("audio_quality") val audioQuality: String? = null,

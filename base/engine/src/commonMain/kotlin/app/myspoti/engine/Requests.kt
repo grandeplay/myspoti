@@ -72,8 +72,10 @@ internal object Bodies {
         val position: Long,
         val duration: Long,
         val bitrate: Int,
-        val format: Int,
-        val audioQuality: String,
+        /** The file's format number (10), or `file_urls_external` for an ad's MP3 (2026-11-16). */
+        val format: JsonPrimitive,
+        /** Null for an ad. */
+        val audioQuality: String?,
     )
 
     /** `PUT {spclient}/track-playback/v1/devices/{dev}/state`. */

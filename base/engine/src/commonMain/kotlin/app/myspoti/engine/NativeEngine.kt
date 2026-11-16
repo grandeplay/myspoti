@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
@@ -25,7 +26,7 @@ sealed class EngineEvent {
     data class TrackLoading(val uri: String, val stateId: String) : EngineEvent()
     data class StateReported(val debugSource: String, val position: Long?) : EngineEvent()
     data class Preloaded(val uri: String) : EngineEvent()
-    /** A server-inserted ad is current. The engine fetches and reports nothing for it (ADS.md). */
+    /** A server-inserted ad is current: the engine plays it as Spotify sends it (its MP3, ADS.md); one without an MP3 is passed. */
     data class AdBreak(val uri: String, val durationMs: Long) : EngineEvent()
     object ContextEnded : EngineEvent()
     data class TokenRefreshed(val url: String) : EngineEvent()
@@ -388,7 +389,11 @@ class NativeEngine(
     /** [track] comes from the same state machine as [state]: a PUT answer in between may renumber tracks. */
     private suspend fun load(state: SmState, track: SmTrack, position: Long, paused: Boolean, reasonStart: String, previousPosition: Long?) {
         if (track.contentType == "AD") {
-            // No ad request is made and nothing is reported as played (decision of 2026-10-16).
+            // Played as Spotify sends it, as the Web Player does: skipping it looped or stopped the
+            // music once Spotify refused the skip (`ad_disallow`, ADS.md).
+            val mp3 = track.manifest["file_urls_mp3"].orEmpty().firstOrNull { !it.fileUrl.isNullOrEmpty() }
+            if (mp3 != null) return loadAd(state, track, mp3, position, paused, reasonStart, previousPosition)
+            // An ad without an MP3 (none seen): passed as before, nothing fetched nor reported.
             current = null
             player.stop()
             emit(EngineEvent.AdBreak(track.metadata.uri, track.metadata.duration))
@@ -420,6 +425,30 @@ class NativeEngine(
     }
 
     /**
+     * An ad played as the Web Player played one (2026-11-16, an ad of 23 s to its end): its MP3
+     * fetched whole, the same reports as a song with the MP3's values (no licence, no stream
+     * verification, no 30 s report), its impression addresses called when its audio plays, and on
+     * to the song its state advances to.
+     */
+    private suspend fun loadAd(state: SmState, track: SmTrack, mp3: ManifestFile, position: Long, paused: Boolean, reasonStart: String, previousPosition: Long?) {
+        emit(EngineEvent.AdBreak(track.metadata.uri, track.metadata.duration))
+        val url = mp3.fileUrl!!
+        val ad = AdAudio(url, mp3.bitrate ?: AD_BITRATE, mp3.impressionUrls)
+        val p = Playback(state.id, track, ChosenFile("", 0, ad.bitrate, "", null), null, position, paused, reasonStart, env.nowMs(), 0, ad)
+        current = p
+        publishNow(p, position, false, buffering = !paused)
+        putState(p, "before_track_load", position, previousPosition, speed = 0)
+        melody(listOf(Bodies.melodyMessage("jssdk_playback_start", Reports.playbackStart(p, sessionId))), "harmony:${config.sdkVersion}")
+        timeline.opened(p, volume)
+        player.loadPlain(track.metadata.uri, url, browserHeaders(url, config), !paused)
+    }
+
+    /** An ad's impression addresses, once its audio plays; one refused (a blocking DNS) changes nothing. */
+    private fun impressions(ad: AdAudio) = ad.impressionUrls.forEach { url ->
+        scope.launch { runCatching { sp.send("GET", url, HeaderProfile.NONE) } }
+    }
+
+    /**
      * End of one track: melody verification + stats, then the `track_data_finalized` PUT (real1 and
      * end-of-track order). [putPosition] is the last position the player reported, 150062 in the
      * PUT while melody said `ms_end_position` 150227 for the same natural end.
@@ -433,8 +462,9 @@ class NativeEngine(
         val now = env.nowMs()
         timeline.position(p, p.lastPosition, if (reasonEnd == "trackdone") 5 else 6)
         melody(
-            listOf(
-                Bodies.melodyMessage("track_stream_verification", Reports.streamVerification(p, sessionId, nextPlaybackId)),
+            listOfNotNull(
+                // The Web Player verified no stream for an ad (2026-11-16): its stats only.
+                if (p.ad == null) Bodies.melodyMessage("track_stream_verification", Reports.streamVerification(p, sessionId, nextPlaybackId)) else null,
                 Bodies.melodyMessage("jssdk_playback_stats", Reports.playbackStats(p, m, sessionId, reasonEnd, licences.lastLicenceLatencyMs, now, config.playbackStrategy)),
             ),
             "harmony:${config.sdkVersion}",
@@ -467,6 +497,7 @@ class NativeEngine(
                 if (p.firstPlayWallMs == 0L) {
                     p.firstPlayWallMs = env.nowMs()
                     timeline.firstPlay(p, e.positionMs)
+                    p.ad?.let(::impressions)
                     // The timeline went out right after the next track's first audio following a
                     // natural end, and 120 s after that (end-of-track: +0.45 s, then +120 s).
                     if (flushOnFirstPlay) { flushOnFirstPlay = false; flushTimeline() }
@@ -529,7 +560,8 @@ class NativeEngine(
             putState(p, "started_playing", position, position)
             if (config.preloadBeforeEndMs == null) preloadNext(p)
         }
-        if (p.started && !p.thresholdSent && p.msPlayed >= p.track.msPlayedUntilUpdate) {
+        // Not for an ad: the Web Player sent none for one, though its threshold was 1000 (2026-11-16).
+        if (p.ad == null && p.started && !p.thresholdSent && p.msPlayed >= p.track.msPlayedUntilUpdate) {
             p.thresholdSent = true
             putState(p, "played_threshold_reached", position, position)
         }
@@ -579,7 +611,8 @@ class NativeEngine(
         stats: JsonObject? = null, duration: Long = p.durationMs, applyAnswer: Boolean = true,
     ) {
         val s = speed ?: if (p.wantPaused) 0 else 1
-        val sub = Bodies.SubState(s, position, duration, p.file.bitrate, p.file.format, p.file.audioQuality)
+        val sub = if (p.ad != null) Bodies.SubState(s, position, duration, p.file.bitrate, JsonPrimitive("file_urls_external"), null)
+        else Bodies.SubState(s, position, duration, p.file.bitrate, JsonPrimitive(p.file.format), p.file.audioQuality)
         putState(machine?.id, p.stateId, p.wantPaused, sub, previousPosition, debugSource, stats, applyAnswer)
     }
 
@@ -620,5 +653,7 @@ class NativeEngine(
     companion object {
         /** `started_playing` came 1066-1245 ms into real playback in every capture (four tracks). */
         const val STARTED_AFTER_MS = 1_000L
+        /** An ad's MP3 bitrate when its manifest gives none (160000 measured, 2026-11-16). */
+        private const val AD_BITRATE = 160_000
     }
 }

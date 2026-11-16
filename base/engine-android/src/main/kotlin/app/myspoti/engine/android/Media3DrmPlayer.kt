@@ -18,6 +18,8 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.ByteArrayDataSource
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -123,6 +125,8 @@ class Media3DrmPlayer(
     private var drmHeld = false
     private val preloads = HashMap<String, DrmSession>()
     @Volatile private var current: CdnItem? = null
+    /** The unprotected file playing instead ([loadPlain], an ad's MP3): its address, until the next load or stop. */
+    @Volatile private var plain: String? = null
     private var currentUri = ""
     private var loadedSent = false
     private var endedSent = false
@@ -247,6 +251,7 @@ class Media3DrmPlayer(
             // Items neither current nor preloaded are dropped with their buffers.
             items.keys.retainAll(setOf(item.uri.toString()) + preloads.keys.mapNotNull { id -> items.values.firstOrNull { it.media.fileId == id }?.uri?.toString() })
             current = item
+            plain = null
             currentUri = item.uri.toString()
             loadedSent = false; endedSent = false; status = null; seekPending = false
             initialBufferingMs = 0; stallStartMs = 0; stalls = 0; stalledMs = 0; maxStalledMs = 0; seekStartMs = 0; seekRebufferingMs = 0
@@ -288,6 +293,45 @@ class Media3DrmPlayer(
 
     private fun releaseOnPlayback(s: DrmSession) { Handler(exo.playbackLooper).post { s.release(null) } }
 
+    /**
+     * An ad's MP3: fetched whole through the engine's own network, as the Web Player's single GET
+     * did (2026-11-16), then played from memory with no DRM. The next song's preload stays ready.
+     */
+    override fun loadPlain(trackUri: String, url: String, headers: Map<String, String>, playWhenReady: Boolean) {
+        loadsPending.incrementAndGet()
+        enqueue {
+            try {
+                val t0 = System.currentTimeMillis()
+                val r = http.request(HttpRequest("GET", url, headers, null))
+                if (r.status !in 200..299) throw java.io.IOException("HTTP ${r.status}")
+                val bytes = r.body
+                log("plain $trackUri: ${bytes.size} B in ${System.currentTimeMillis() - t0} ms")
+                withContext(appDispatcher) {
+                    current = null
+                    plain = url
+                    currentUri = url
+                    loadedSent = false; endedSent = false; status = null; seekPending = false
+                    initialBufferingMs = 0; stallStartMs = 0; stalls = 0; stalledMs = 0; maxStalledMs = 0; seekStartMs = 0; seekRebufferingMs = 0
+                    loadAtMs = System.currentTimeMillis()
+                    val source = ProgressiveMediaSource.Factory(DataSource.Factory { ByteArrayDataSource(bytes) })
+                        .createMediaSource(MediaItem.Builder().setUri(url).setMediaId(trackUri).build())
+                    exo.setMediaSource(source, 0)
+                    exo.volume = if (muted) 0f else volume
+                    wantsPlay = playWhenReady
+                    exo.playWhenReady = playWhenReady
+                    exo.prepare()
+                    log("load $trackUri (plain) play=$playWhenReady")
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emit(PlayerEvent.Error("ad audio not loaded: ${e.message}", 0))
+            } finally {
+                loadsPending.decrementAndGet()
+            }
+        }
+    }
+
     override fun pause() = onPlayer {
         wantsPlay = false
         // Already paused (by itself, or before the engine's command came back): confirm it.
@@ -310,6 +354,7 @@ class Media3DrmPlayer(
         exo.stop()
         exo.clearMediaItems()
         current = null
+        plain = null
         currentUri = ""
         status = null
         preloads.values.forEach(::releaseOnPlayback)
@@ -373,7 +418,7 @@ class Media3DrmPlayer(
 
     private val ticker = object : Runnable {
         override fun run() {
-            if (current != null && exo.isPlaying) {
+            if ((current != null || plain != null) && exo.isPlaying) {
                 emit(PlayerEvent.Position(position()))
                 // A track that starts on time, at most 250 ms between reports (the core asks for <= 500).
                 handler.postDelayed(this, 250)
@@ -391,7 +436,7 @@ class Media3DrmPlayer(
 
     /** One status from Media3's three flags: what Spotify is told depends on audio really playing. */
     private fun evaluate() {
-        if (current == null || exo.playbackState == Player.STATE_IDLE || exo.playbackState == Player.STATE_ENDED) return
+        if ((current == null && plain == null) || exo.playbackState == Player.STATE_IDLE || exo.playbackState == Player.STATE_ENDED) return
         val s = when {
             exo.isPlaying -> Status.PLAYING
             !exo.playWhenReady || exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE -> Status.PAUSED
@@ -417,14 +462,14 @@ class Media3DrmPlayer(
 
     private inner class Events : Player.Listener {
         override fun onPlaybackStateChanged(state: Int) {
-            if (current == null) return
+            if (current == null && plain == null) return
             val now = System.currentTimeMillis()
             when (state) {
                 Player.STATE_READY -> {
                     if (!loadedSent) {
                         loadedSent = true
                         current?.loadedAtMs?.let { initialBufferingMs = now - it }
-                        emit(PlayerEvent.Loaded(exo.duration.takeIf { it != C.TIME_UNSET } ?: current!!.media.durationMs))
+                        emit(PlayerEvent.Loaded(exo.duration.takeIf { it != C.TIME_UNSET } ?: current?.media?.durationMs ?: 0))
                     }
                     if (stallStartMs > 0) {
                         val d = now - stallStartMs
@@ -452,7 +497,7 @@ class Media3DrmPlayer(
         override fun onPlaybackSuppressionReasonChanged(reason: Int) = evaluate()
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-            if (!playWhenReady && current != null && wantsPlay) {
+            if (!playWhenReady && (current != null || plain != null) && wantsPlay) {
                 if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS || reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY) wantsPlay = false
                 when (reason) {
                     Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> onPlayerPause?.invoke("audio focus lost")

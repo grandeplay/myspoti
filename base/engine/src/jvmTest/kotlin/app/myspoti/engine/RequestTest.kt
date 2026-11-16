@@ -39,7 +39,7 @@ class RequestTest {
         val ref = btl["state_ref"]!!.jsonObject
         val built = Bodies.state(
             2, ref["state_machine_id"]!!.jsonPrimitive.content, ref["state_id"]!!.jsonPrimitive.content, true,
-            Bodies.SubState(0, 60271, 150226, 128000, 10, "HIGH"), null, "before_track_load",
+            Bodies.SubState(0, 60271, 150226, 128000, kotlinx.serialization.json.JsonPrimitive(10), "HIGH"), null, "before_track_load",
         )
         assertEquals(btl, built)
         for (name in listOf("state-started-playing.json", "state-played-threshold.json", "state-before-track-load-next.json")) {
@@ -51,7 +51,7 @@ class RequestTest {
                 r["state_id"]!!.jsonPrimitive.content, r["paused"]!!.jsonPrimitive.content.toBoolean(),
                 Bodies.SubState(
                     s["playback_speed"]!!.jsonPrimitive.content.toInt(), s["position"]!!.jsonPrimitive.content.toLong(),
-                    s["duration"]!!.jsonPrimitive.content.toLong(), 128000, 10, "HIGH",
+                    s["duration"]!!.jsonPrimitive.content.toLong(), 128000, kotlinx.serialization.json.JsonPrimitive(10), "HIGH",
                 ),
                 c["previous_position"]!!.jsonPrimitive.content.toLong(), c["debug_source"]!!.jsonPrimitive.content,
             )

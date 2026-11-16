@@ -21,21 +21,25 @@ internal class Playback(
     val stateId: String,
     val track: SmTrack,
     val file: ChosenFile,
-    val media: PlayableMedia,
+    /** The song's protected media; null for an [ad]. */
+    val media: PlayableMedia?,
     val startPosition: Long,
     val initiallyPaused: Boolean,
     val reasonStart: String,
     val loadWallMs: Long,
     val resolveLatencyMs: Long,
+    /** An ad's MP3, played as Spotify sends it (ADS.md, 2026-11-16); null for a song. */
+    val ad: AdAudio? = null,
 ) {
     var lastPosition = startPosition
     var durationMs = track.metadata.duration
     /**
      * The file's own duration (seektable, rounded): what the Web Player put in the finalized PUT's
      * `duration`, `ms_total_est` and melody's `ms_file_duration`, while `started_playing` carried
-     * the media element's 150274 for the same file (end-of-track capture, 2026-11-10).
+     * the media element's 150274 for the same file (end-of-track capture, 2026-11-10). An ad has no
+     * seektable: the player's duration (23067 for its 23000, 2026-11-16).
      */
-    val fileDurationMs get() = media.durationMs.takeIf { it > 0 } ?: track.metadata.duration
+    val fileDurationMs get() = if (ad != null) durationMs else media?.durationMs?.takeIf { it > 0 } ?: track.metadata.duration
     var msPlayed = 0L
     var playing = false
     var countedFrom: Long? = null
@@ -69,6 +73,9 @@ internal class Playback(
     }
 }
 
+/** An ad's audio: an unprotected MP3 ([url], [bitrate]) and the addresses called when it plays. */
+internal class AdAudio(val url: String, val bitrate: Int, val impressionUrls: List<String>)
+
 /**
  * Melody messages and `playback_stats`, field for field as the Web Player sent them (real1
  * capture 2026-10-26 for the end-of-track messages, play-bodies 2026-11-10 for the rest).
@@ -101,16 +108,25 @@ internal object Reports {
         put("playback_service", "track-playback")
     }
 
-    private fun audioFormatKey(p: Playback) = "${p.media.codec};${p.file.bitrate}"
+    private fun audioFormatKey(p: Playback) = if (p.ad != null) "mp3;${p.file.bitrate}" else "${p.media!!.codec};${p.file.bitrate}"
 
+    /**
+     * An ad's values differ where its MP3 does (2026-11-16): no file id, `mp3`, no key system, its
+     * one URL, no licence, `ms_file_duration` 0 and `total_bytes` 0 as the Web Player sent them.
+     */
     fun playbackStats(p: Playback, m: PlaybackMetrics, sessionId: String, reasonEnd: String, licenceLatencyMs: Long, now: Long, strategy: String): JsonObject = buildJsonObject {
+        val ad = p.ad
         val urls = buildJsonObject {
             put("version", "1.0.0")
             putJsonArray("urls") {
-                // `segments` counts the fragments fetched (4 for a resume 30 s before the end, end-of-track capture).
-                val segments = m.segmentsFetched.takeIf { it > 0 } ?: p.media.segments.size
-                add(buildJsonObject { put("url", p.media.cdnUrls.first()); put("segments", segments); put("avg_bw", m.bandwidthAvgBps.toDouble()) })
-                add(buildJsonObject { put("url", ""); put("segments", segments); put("avg_bw", 0) })
+                if (ad != null) add(buildJsonObject { put("url", ad.url); put("segments", 1); put("avg_bw", 0) })
+                else {
+                    val media = p.media!!
+                    // `segments` counts the fragments fetched (4 for a resume 30 s before the end, end-of-track capture).
+                    val segments = m.segmentsFetched.takeIf { it > 0 } ?: media.segments.size
+                    add(buildJsonObject { put("url", media.cdnUrls.first()); put("segments", segments); put("avg_bw", m.bandwidthAvgBps.toDouble()) })
+                    add(buildJsonObject { put("url", ""); put("segments", segments); put("avg_bw", 0) })
+                }
             }
         }
         put("play_track", p.track.metadata.uri)
@@ -119,12 +135,12 @@ internal object Reports {
         put("internal_play_id", "1")
         put("memory_cached", false)
         put("persistent_cached", false)
-        put("audio_format", "mp4")
+        put("audio_format", if (ad != null) "mp3" else "mp4")
         put("video_format", "")
         put("manifest_id", p.file.fileId)
         put("protected", true)
-        put("key_system", KEY_SYSTEM)
-        put("key_system_impl", "native")
+        put("key_system", if (ad != null) "" else KEY_SYSTEM)
+        put("key_system_impl", if (ad != null) "" else "native")
         put("urls_json", urls.toString())
         put("start_time", p.loadWallMs)
         put("end_time", now)
@@ -141,11 +157,11 @@ internal object Reports {
         put("ms_resolve_latency", p.resolveLatencyMs)
         put("ms_license_session_latency", 0)
         put("ms_license_generation_latency", 0)
-        put("ms_license_request_latency", licenceLatencyMs)
+        if (ad != null) put("ms_license_request_latency", JsonNull) else put("ms_license_request_latency", licenceLatencyMs)
         put("ms_license_update_latency", 0)
         put("ms_played", p.msPlayed)
         put("ms_nominal_played", p.msPlayed)
-        put("ms_file_duration", p.fileDurationMs)
+        put("ms_file_duration", if (ad != null) 0 else p.fileDurationMs)
         put("ms_actual_duration", p.fileDurationMs)
         put("ms_metadata_duration", 0)
         put("ms_start_position", p.startPosition)
@@ -183,7 +199,7 @@ internal object Reports {
         put("n_total_video_frames", 0)
         put("resolution_max", 0)
         put("resolution_min", 0)
-        put("total_bytes", m.totalBytes)
+        put("total_bytes", if (p.ad != null) 0 else m.totalBytes)
         put("strategy", strategy)
         putJsonObject("ms_played_per_audio_format") { put(audioFormatKey(p), p.msPlayed) }
         putJsonObject("ms_played_per_video_format") {}
@@ -211,14 +227,14 @@ internal object Reports {
         put("bps_bandwidth_max", 0)
         put("bps_bandwidth_min", 0)
         put("bps_bandwidth_avg", 0)
-        put("audiocodec", "mp4")
+        put("audiocodec", if (p.ad != null) "mp3" else "mp4")
         put("audio_start_bitrate", p.file.bitrate)
         put("video_start_bitrate", JsonNull)
         put("start_bitrate", p.file.bitrate)
         put("time_weighted_bitrate", 0)
-        put("key_system", "widevine")
-        put("ms_key_latency", licenceLatencyMs)
-        put("total_bytes", m.totalBytes)
+        put("key_system", if (p.ad != null) "none" else "widevine")
+        put("ms_key_latency", if (p.ad != null) 0 else licenceLatencyMs)
+        put("total_bytes", if (p.ad != null) 0 else m.totalBytes)
         put("local_time_ms", p.loadWallMs)
         put("n_dropped_video_frames", 0)
         put("n_total_video_frames", 0)
@@ -276,7 +292,8 @@ internal class Timeline(private val env: Environment) {
     /** et 0 (media opened) + 7 (key system) + 2 (waiting for data). */
     fun opened(p: Playback, volume: Int) {
         val ms = buildJsonObject {
-            put("mu", "spotify-audio://${p.file.fileId}")
+            // An ad's media is its MP3's address (2026-11-16).
+            put("mu", p.ad?.url ?: "spotify-audio://${p.file.fileId}")
             if (firstOfSession) put("fi", "")
             put("pi", p.stateId)
             if (firstOfSession) { put("si", ""); put("mt", "audio") }
@@ -293,12 +310,22 @@ internal class Timeline(private val env: Environment) {
             put("ur", p.track.metadata.uri); put("pc", ""); put("xt", "audio")
         }
         add(p, 7) { putJsonObject("ks") { put("nm", Reports.KEY_SYSTEM); put("im", "native") } }
-        add(p, 2, buildJsonObject { put("sp", 0) })
+        add(p, 2, if (p.ad != null) JsonObject(emptyMap()) else buildJsonObject { put("sp", 0) })
         p.lastTimelineWallMs = now
     }
 
-    /** First audio: et 3 (data flowing), 10/rn 0 (initial position), 4 (playing), 9 (format). */
+    /**
+     * First audio: et 3 (data flowing), 10/rn 0 (initial position), 4 (playing), 9 (format). An ad's
+     * (2026-11-16): 3 and 10 without speed nor position, 4, and no 9.
+     */
     fun firstPlay(p: Playback, position: Long) {
+        if (p.ad != null) {
+            add(p, 3)
+            add(p, 10, buildJsonObject { put("md", p.durationMs) }) { put("rn", 0); put("bt", p.loadWallMs); put("rf", 0); put("df", 0) }
+            add(p, 4)
+            p.lastTimelineWallMs = env.nowMs()
+            return
+        }
         add(p, 3, buildJsonObject { put("sp", 1) })
         add(p, 10, buildJsonObject { put("md", p.durationMs); put("pp", position) }) {
             put("rn", 0); put("bt", p.loadWallMs); put("rf", 0); put("df", 0)
@@ -307,7 +334,7 @@ internal class Timeline(private val env: Environment) {
         add(p, 9, buildJsonObject { put("pp", position); put("br", p.file.bitrate) }) {
             putJsonObject("ap") {
                 put("qi", p.loadWallMs.toString())
-                put("cc", "audio/mp4; codecs=\"${p.media.codec}\"")
+                put("cc", "audio/mp4; codecs=\"${p.media!!.codec}\"")
                 put("ab", p.file.bitrate); put("xb", p.file.bitrate)
             }
             put("fr", 0); put("ty", "audio"); put("rn", "abr")

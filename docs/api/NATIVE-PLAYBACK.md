@@ -350,8 +350,11 @@ Timeline events: `{sn, ct, ms, ps, et, ...}`, `sn` from 0 per playback, `ct` wal
 
 ## 10. What the native engine leaves out
 
-- Ads: `ads/v2/config` and ad audio are never requested. A state whose track is `content_type:
-  AD` is not loaded and nothing is reported for it; the caller is told (`AdBreak`). ADS.md.
+- Ads: `ads/v2/config` is never requested. A state whose track is `content_type: AD` is played as
+  Spotify sends it: its MP3 (`file_urls_mp3`) fetched whole and played with no DRM, the same
+  reports as a song with the MP3's values, its `impression_urls` called when its audio plays, then
+  on along `advance`; the caller is told (`AdBreak`). An ad without an MP3 is passed with a skip.
+  ADS.md, "Measured on 2026-11-16".
 - Canvas and music video (`manifests/v9`, `video-fa.scdn.co`, the `overture` melody batches with
   `play_track: spotify:canvas:...`), `gabo-receiver-service` UI events, `client_event` debug
   logs, `remote-config-resolver`, `melody/v1/time` (server clock), CORS preflights.
