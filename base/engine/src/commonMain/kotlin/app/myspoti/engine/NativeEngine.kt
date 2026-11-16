@@ -135,6 +135,8 @@ class NativeEngine(
     private var machine: StateMachine? = null
     private var stateIndex = -1
     private var current: Playback? = null
+    /** The ad this engine skipped, until a song loads: an ad then is Spotify's answer to the skip. */
+    private var adSkipped: String? = null
     private var flushOnFirstPlay = false
     private val pendingCommands = ArrayDeque<SentCommand>()
 
@@ -390,10 +392,20 @@ class NativeEngine(
             current = null
             player.stop()
             emit(EngineEvent.AdBreak(track.metadata.uri, track.metadata.duration))
+            // An ad right after the skip of one is Spotify's answer to it: once an ad was left out,
+            // its skip_next leads to the ad too (docs/api/ADS.md). Skipped again, it came back about
+            // three times a second until Spotify refused the account everything for a minute (429):
+            // one skip until a song plays, then the ad is left where it is.
+            if (adSkipped != null) {
+                emit(EngineEvent.Failure("ad not passed: Spotify sent ${track.metadata.uri} back after a skip"))
+                return
+            }
+            adSkipped = track.metadata.uri
             // On to the next song (outside this handler: a command waits for the lock it holds).
             scope.launch { runCatching { command("skip_next") }.onFailure { emit(EngineEvent.Failure("ad not passed: ${it.message}")) } }
             return
         }
+        adSkipped = null
         emit(EngineEvent.TrackLoading(track.metadata.uri, state.id))
         val file = Resolver.chooseFile(track, formatFilter, lowestQuality) ?: throw EngineException.Protocol("no playable file for ${track.metadata.uri}")
         val t0 = env.nowMs()
